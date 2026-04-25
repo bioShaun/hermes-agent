@@ -24,6 +24,7 @@ from tools.delegate_tool import (
     _get_max_concurrent_children,
     _LEGACY_EVENT_MAP,
     MAX_DEPTH,
+    _child_model_metadata,
     check_delegate_requirements,
     delegate_task,
     _build_child_agent,
@@ -211,6 +212,26 @@ class TestDelegateTask(unittest.TestCase):
         self.assertEqual(result["results"][0]["status"], "error")
         self.assertIn("Something broke", result["results"][0]["error"])
 
+    @patch("tools.delegate_tool._run_single_child")
+    def test_delegate_task_returns_route_metadata(self, mock_run):
+        mock_run.return_value = {
+            "task_index": 0,
+            "status": "completed",
+            "summary": "Done!",
+            "api_calls": 1,
+            "duration_seconds": 0.1,
+            "model": "glm-5",
+            "provider": "custom",
+            "base_url": "https://api.lkeap.cloud.tencent.com/coding/v3",
+        }
+        parent = _make_mock_parent()
+        result = json.loads(delegate_task(goal="Route check", parent_agent=parent))
+        self.assertEqual(result["delegation_model"], parent.model)
+        self.assertEqual(result["delegation_provider"], parent.provider)
+        self.assertEqual(result["delegation_base_url"], parent.base_url)
+        self.assertEqual(result["results"][0]["model"], "glm-5")
+        self.assertEqual(result["results"][0]["provider"], "custom")
+
     def test_depth_increments(self):
         """Verify child gets parent's depth + 1."""
         parent = _make_mock_parent(depth=0)
@@ -307,6 +328,43 @@ class TestDelegateTask(unittest.TestCase):
         self.assertTrue(callable(mock_child.thinking_callback))
         mock_child.thinking_callback("deliberating...")
         parent.tool_progress_callback.assert_not_called()
+
+
+class TestDelegateRouteMetadata(unittest.TestCase):
+    def test_child_model_metadata_handles_missing_fields(self):
+        child = MagicMock()
+        child.model = "glm-5"
+        child.provider = "custom"
+        child.base_url = "https://api.lkeap.cloud.tencent.com/coding/v3"
+        self.assertEqual(
+            _child_model_metadata(child),
+            {
+                "model": "glm-5",
+                "provider": "custom",
+                "base_url": "https://api.lkeap.cloud.tencent.com/coding/v3",
+            },
+        )
+
+    def test_child_progress_callback_relays_provider_and_base_url(self):
+        parent = _make_mock_parent()
+        parent.tool_progress_callback = MagicMock()
+        cb = _build_child_progress_callback(
+            0,
+            "Research routing",
+            parent,
+            1,
+            subagent_id="sa-1",
+            model="glm-5",
+            provider="custom",
+            base_url="https://api.lkeap.cloud.tencent.com/coding/v3",
+            toolsets=["terminal"],
+        )
+        cb("subagent.start", preview="Research routing")
+        args, kwargs = parent.tool_progress_callback.call_args
+        self.assertEqual(args[0], "subagent.start")
+        self.assertEqual(kwargs["model"], "glm-5")
+        self.assertEqual(kwargs["provider"], "custom")
+        self.assertEqual(kwargs["base_url"], "https://api.lkeap.cloud.tencent.com/coding/v3")
 
 
 class TestToolNamePreservation(unittest.TestCase):
