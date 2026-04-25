@@ -1969,6 +1969,22 @@ class HermesCLI:
             or os.getenv("HERMES_INFERENCE_PROVIDER")
             or "auto"
         )
+        # Normalize startup model strings like `custom:lkeap:glm-5` the same
+        # way `/model custom:lkeap:glm-5` does. Without this, `-m`/config
+        # startup paths keep the whole triple in `self.model` while leaving
+        # `requested_provider` on the stale configured provider (e.g.
+        # `openai-codex`), so runtime resolution routes to the wrong base_url.
+        if self.model and not provider:
+            try:
+                from hermes_cli.models import parse_model_input
+
+                parsed_provider, parsed_model = parse_model_input(self.model, self.requested_provider)
+                if parsed_model:
+                    self.model = parsed_model
+                if parsed_provider:
+                    self.requested_provider = parsed_provider
+            except Exception:
+                pass
         self._provider_source: Optional[str] = None
         self.provider = self.requested_provider
         self.api_mode = "chat_completions"
