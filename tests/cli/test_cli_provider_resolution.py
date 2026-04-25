@@ -230,6 +230,41 @@ def test_cli_prefers_config_provider_over_stale_env_override(monkeypatch):
     assert shell.requested_provider == "custom"
 
 
+def test_cli_parses_named_custom_provider_from_model_arg(monkeypatch):
+    cli = _import_cli()
+
+    config_copy = dict(cli.CLI_CONFIG)
+    model_copy = dict(config_copy.get("model", {}))
+    model_copy["provider"] = "openai-codex"
+    model_copy["base_url"] = "https://chatgpt.com/backend-api/codex"
+    config_copy["model"] = model_copy
+    monkeypatch.setattr(cli, "CLI_CONFIG", config_copy)
+
+    shell = cli.HermesCLI(model="custom:lkeap:glm-5", compact=True, max_turns=1)
+
+    assert shell.model == "glm-5"
+    assert shell.requested_provider == "custom:lkeap"
+    assert shell.provider == "custom:lkeap"
+
+
+def test_cli_parses_named_custom_provider_from_config_default(monkeypatch):
+    cli = _import_cli()
+
+    config_copy = dict(cli.CLI_CONFIG)
+    model_copy = dict(config_copy.get("model", {}))
+    model_copy["default"] = "custom:lkeap:glm-5"
+    model_copy["provider"] = "openai-codex"
+    model_copy["base_url"] = "https://chatgpt.com/backend-api/codex"
+    config_copy["model"] = model_copy
+    monkeypatch.setattr(cli, "CLI_CONFIG", config_copy)
+
+    shell = cli.HermesCLI(compact=True, max_turns=1)
+
+    assert shell.model == "glm-5"
+    assert shell.requested_provider == "custom:lkeap"
+    assert shell.provider == "custom:lkeap"
+
+
 def test_codex_provider_replaces_incompatible_default_model(monkeypatch):
     """When provider resolves to openai-codex and no model was explicitly
     chosen, the global config default (e.g. anthropic/claude-opus-4.6) must
