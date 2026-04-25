@@ -589,6 +589,8 @@ def _build_child_progress_callback(
     parent_id: Optional[str] = None,
     depth: Optional[int] = None,
     model: Optional[str] = None,
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
     toolsets: Optional[List[str]] = None,
 ) -> Optional[callable]:
     """Build a callback that relays child agent tool calls to the parent display.
@@ -598,8 +600,9 @@ def _build_child_progress_callback(
       Gateway: batches tool names and relays to parent's progress callback
 
     The identity kwargs (``subagent_id``, ``parent_id``, ``depth``, ``model``,
-    ``toolsets``) are threaded into every relayed event so the TUI can
-    reconstruct the live spawn tree and route per-branch controls (kill,
+    ``provider``, ``base_url``, ``toolsets``) are threaded into every relayed
+    event so the TUI can reconstruct the live spawn tree and route per-branch
+    controls (kill,
     pause) back by ``subagent_id``.  All are optional for backward compat —
     older callers that ignore them still produce a flat list on the TUI.
 
@@ -635,6 +638,10 @@ def _build_child_progress_callback(
             kw["depth"] = depth
         if model is not None:
             kw["model"] = model
+        if provider is not None:
+            kw["provider"] = provider
+        if base_url is not None:
+            kw["base_url"] = base_url
         if toolsets is not None:
             kw["toolsets"] = list(toolsets)
         kw["tool_count"] = _tool_count[0]
@@ -877,41 +884,10 @@ def _build_child_agent(
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
         parent_api_key = parent_agent._client_kwargs.get("api_key")
 
-    # Resolve the child's effective model early so it can ride on every event.
-    effective_model_for_cb = model or getattr(parent_agent, "model", None)
-
-    # Build progress callback to relay tool calls to parent display.
-    # Identity kwargs thread the subagent_id through every emitted event so the
-    # TUI can reconstruct the spawn tree and route per-branch controls.
-    child_progress_cb = _build_child_progress_callback(
-        task_index,
-        goal,
-        parent_agent,
-        task_count,
-        subagent_id=subagent_id,
-        parent_id=parent_subagent_id,
-        depth=tui_depth,
-        model=effective_model_for_cb,
-        toolsets=child_toolsets,
-    )
-
     # Each subagent gets its own iteration budget capped at max_iterations
     # (configurable via delegation.max_iterations, default 50).  This means
     # total iterations across parent + subagents can exceed the parent's
     # max_iterations.  The user controls the per-subagent cap in config.yaml.
-
-    child_thinking_cb = None
-    if child_progress_cb:
-
-        def _child_thinking(text: str) -> None:
-            if not text:
-                return
-            try:
-                child_progress_cb("_thinking", text)
-            except Exception as e:
-                logger.debug("Child thinking callback relay failed: %s", e)
-
-        child_thinking_cb = _child_thinking
 
     # Resolve effective credentials: config override > parent inherit
     effective_model = model or parent_agent.model
@@ -933,6 +909,36 @@ def _build_child_agent(
         # so run_agent.py initializes the CopilotACPClient.
         effective_provider = "copilot-acp"
         effective_api_mode = "chat_completions"
+
+    # Build progress callback to relay tool calls to parent display.
+    # Identity kwargs thread the subagent_id through every emitted event so the
+    # TUI can reconstruct the spawn tree and route per-branch controls.
+    child_progress_cb = _build_child_progress_callback(
+        task_index,
+        goal,
+        parent_agent,
+        task_count,
+        subagent_id=subagent_id,
+        parent_id=parent_subagent_id,
+        depth=tui_depth,
+        model=effective_model,
+        provider=effective_provider,
+        base_url=effective_base_url,
+        toolsets=child_toolsets,
+    )
+
+    child_thinking_cb = None
+    if child_progress_cb:
+
+        def _child_thinking(text: str) -> None:
+            if not text:
+                return
+            try:
+                child_progress_cb("_thinking", text)
+            except Exception as e:
+                logger.debug("Child thinking callback relay failed: %s", e)
+
+        child_thinking_cb = _child_thinking
 
     # Resolve reasoning config: delegation override > parent inherit
     parent_reasoning = getattr(parent_agent, "reasoning_config", None)
@@ -1165,6 +1171,17 @@ def _dump_subagent_timeout_diagnostic(
         logger.warning("Subagent timeout diagnostic dump failed: %s", exc)
         return None
 
+def _child_model_metadata(child) -> Dict[str, Optional[str]]:
+    """Capture the delegated child's route for user-visible reporting."""
+    model = getattr(child, "model", None)
+    provider = getattr(child, "provider", None)
+    base_url = getattr(child, "base_url", None)
+    return {
+        "model": model if isinstance(model, str) else None,
+        "provider": provider if isinstance(provider, str) else None,
+        "base_url": base_url if isinstance(base_url, str) else None,
+    }
+
 
 def _run_single_child(
     task_index: int,
@@ -1178,6 +1195,7 @@ def _run_single_child(
     Returns a structured result dict.
     """
     child_start = time.monotonic()
+    child_meta = _child_model_metadata(child)
 
     # Get the progress callback from the child agent
     child_progress_cb = getattr(child, "tool_progress_callback", None)
@@ -1442,6 +1460,7 @@ def _run_single_child(
                 "duration_seconds": duration,
                 "_child_role": getattr(child, "_delegate_role", None),
                 "diagnostic_path": diagnostic_path,
+                **child_meta,
             }
         finally:
             # Shut down executor without waiting — if the child thread
@@ -1519,15 +1538,12 @@ def _run_single_child(
         # Extract token counts (safe for mock objects)
         _input_tokens = getattr(child, "session_prompt_tokens", 0)
         _output_tokens = getattr(child, "session_completion_tokens", 0)
-        _model = getattr(child, "model", None)
-
         entry: Dict[str, Any] = {
             "task_index": task_index,
             "status": status,
             "summary": summary,
             "api_calls": api_calls,
             "duration_seconds": duration,
-            "model": _model if isinstance(_model, str) else None,
             "exit_reason": exit_reason,
             "tokens": {
                 "input": (
@@ -1542,6 +1558,7 @@ def _run_single_child(
             # parent thread can fire subagent_stop with the correct role.
             # Stripped before the dict is serialised back to the model.
             "_child_role": getattr(child, "_delegate_role", None),
+            **child_meta,
         }
         if status == "failed":
             entry["error"] = result.get("error", "Subagent did not produce a response.")
@@ -1612,6 +1629,9 @@ def _run_single_child(
             "status": status,
             "duration_seconds": duration,
             "summary": summary[:500] if summary else entry.get("error", ""),
+            "model": child_meta.get("model"),
+            "provider": child_meta.get("provider"),
+            "base_url": child_meta.get("base_url"),
             "input_tokens": (
                 int(_input_tokens) if isinstance(_input_tokens, (int, float)) else 0
             ),
@@ -1664,6 +1684,7 @@ def _run_single_child(
             "api_calls": 0,
             "duration_seconds": duration,
             "_child_role": getattr(child, "_delegate_role", None),
+            **child_meta,
         }
 
     finally:
@@ -1931,6 +1952,7 @@ def delegate_task(
                                     "_child_role": getattr(
                                         _child_by_index.get(idx), "_delegate_role", None
                                     ),
+                                    **_child_model_metadata(_child_by_index.get(idx)),
                                 }
                         else:
                             entry = {
@@ -1943,6 +1965,7 @@ def delegate_task(
                                 "_child_role": getattr(
                                     _child_by_index.get(idx), "_delegate_role", None
                                 ),
+                                **_child_model_metadata(_child_by_index.get(idx)),
                             }
                         results.append(entry)
                         completed_count += 1
@@ -1968,6 +1991,7 @@ def delegate_task(
                             "_child_role": getattr(
                                 _child_by_index.get(idx), "_delegate_role", None
                             ),
+                            **_child_model_metadata(_child_by_index.get(idx)),
                         }
                     results.append(entry)
                     completed_count += 1
@@ -2060,6 +2084,9 @@ def delegate_task(
         {
             "results": results,
             "total_duration_seconds": total_duration,
+            "delegation_model": creds.get("model") or getattr(parent_agent, "model", None),
+            "delegation_provider": creds.get("provider") or getattr(parent_agent, "provider", None),
+            "delegation_base_url": creds.get("base_url") or getattr(parent_agent, "base_url", None),
         },
         ensure_ascii=False,
     )

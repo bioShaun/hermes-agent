@@ -176,6 +176,16 @@ SKILLS_GUIDANCE = (
     "Skills that aren't maintained become liabilities."
 )
 
+DELEGATION_DISCLOSURE_GUIDANCE = (
+    "When this turn uses delegate_task or reports results from delegated subtasks, "
+    "you must explicitly tell the user which model handled the delegated work. "
+    "Read delegation_model/delegation_provider from the tool result for the overall route, "
+    "and read each child result's model/provider when present. "
+    "Do not hide this in prose. Use a short dedicated line or bullet such as "
+    "'子任务模型：glm-5（provider: custom:lkeap）'. "
+    "If multiple delegated subtasks used different models, list each task with its model."
+)
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "
